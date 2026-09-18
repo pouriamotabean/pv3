@@ -138,7 +138,19 @@ void PVAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     if(apvts.getRawParameterValue("bypass")->load()>.5f)
     {
         for(int i=0;i<n;++i){ float v=b.getSample(0,i); b.setSample(0,i,v); if(b.getNumChannels()>1) b.setSample(1,i,v); }
+        wasBypassed=true;
         return;
+    }
+    if(wasBypassed)
+    {
+        // Coming out of bypass - everything that has internal state gets a clean restart instead of
+        // resuming from however stale it got while it wasn't being fed audio.
+        up.reset(); down.reset();
+        tapeHpStateL=0.f; tapeHpStateR=0.f;
+        std::fill(chorusBufL.begin(),chorusBufL.end(),0.f);
+        std::fill(chorusBufR.begin(),chorusBufR.end(),0.f);
+        chorusWriteL=0; chorusWriteR=0;
+        wasBypassed=false;
     }
 
     const float magic=apvts.getRawParameterValue("magic")->load();
@@ -190,6 +202,8 @@ void PVAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
         outL = outL*(1.f-chorus) + wetL*chorus;
         outR = outR*(1.f-chorus) + wetR*chorus;
 
+        if(!std::isfinite(outL)) outL=0.f;
+        if(!std::isfinite(outR)) outR=0.f;
         o.setSample(0,i,outL); o.setSample(1,i,outR);
     }
     chorusPhase = ph;

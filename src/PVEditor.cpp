@@ -169,10 +169,15 @@ void PVAudioProcessorEditor::resized()
     magicHint.setBounds(455,101,175,18);
 
     // Three knobs evenly spaced across the lower area: MAGIC (left, alone) | TAPE, CHORUS (right pair)
-    magic.setBounds(70,143,145,145);
+    // FIX (real bug found in review): Magic is intentionally bigger than Tape/Chorus (it's the primary
+    // control) but was positioned at the same TOP y-coordinate as them, which put its CENTRE 12.5px
+    // lower than theirs - visibly "not centered" relative to the other two. Aligning all three knobs'
+    // vertical centers instead, regardless of their differing sizes, fixes this properly.
+    const int tapeChorusCenterY = 143 + 120/2;
+    magic.setBounds(70, tapeChorusCenterY-145/2, 145, 145);
     tape.setBounds(380,143,120,120);
     chorus.setBounds(520,143,120,120);
-    magicLabel.setBounds(70,292,145,20);
+    magicLabel.setBounds(70, tapeChorusCenterY+145/2+4, 145, 20);
     tapeLabel.setBounds(380,268,120,20);
     chorusLabel.setBounds(520,268,120,20);
 }

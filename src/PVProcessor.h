@@ -75,5 +75,17 @@ private:
     int chorusWriteL = 0, chorusWriteR = 0;
     float chorusVoice(std::vector<float>& buf, int& writePos, float input, double lfoPhase);
 
+    // FIX (real bug found in review - this is very likely the actual cause of "bypass doesn't work /
+    // a bad noise appears"): the bypass branch in processBlock returns BEFORE the phase vocoders ever
+    // get fed a sample - exactly the same "goes stale while not being fed audio" problem already fixed
+    // for the Magic knob, just triggered by BYPASS instead. While bypassed, up/down's internal ring
+    // buffers and accumulated phase sit untouched; resuming from that stale state when bypass turns
+    // off again is a classic phase-vocoder glitch source, and in the worst case (extended silence
+    // while stale) can drift into NaN/Inf, which would show up as a *loud, sustained* noise, exactly
+    // matching what was reported - and would explain the noise appearing "even at Magic=0", since
+    // NaN*0 is still NaN, not 0. Tracking the bypass transition lets processBlock fully reset
+    // everything the instant bypass turns off, rather than resuming from whatever state was left over.
+    bool wasBypassed = false;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PVAudioProcessor)
 };
