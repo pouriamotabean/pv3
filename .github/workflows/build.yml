@@ -1,0 +1,45 @@
+name: Build PV VST3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch JUCE 9.0.2
+        shell: pwsh
+        run: git clone --depth 1 --branch 9.0.2 https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel -- /clp:ErrorsOnly;Summary
+
+      - name: Collect plugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $plugin = Get-ChildItem -Path build -Recurse -Directory -Filter 'PV.vst3' | Select-Object -First 1
+          if (-not $plugin) { throw 'PV.vst3 was not produced by the build.' }
+          Copy-Item -Recurse -Force $plugin.FullName (Join-Path (Resolve-Path dist) 'PV.vst3')
+          Compress-Archive -Path (Join-Path (Resolve-Path dist) 'PV.vst3') -DestinationPath (Join-Path (Resolve-Path dist) 'PV-VST3.zip') -Force
+
+      - name: Upload PV VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: PV-VST3
+          path: dist/PV-VST3.zip
+          if-no-files-found: error
+          retention-days: 30
