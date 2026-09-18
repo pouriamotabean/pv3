@@ -1,4 +1,5 @@
 #include "PVProcessor.h"
+#include "PVEditor.h"
 
 float PVAudioProcessor::PVocoder::process(float x, double sr)
 {
