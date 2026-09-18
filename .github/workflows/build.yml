@@ -24,7 +24,7 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release --parallel -- /clp:ErrorsOnly;Summary
+        run: cmake --build build --config Release --parallel -- "/clp:ErrorsOnly;Summary"
 
       - name: Collect plugin
         shell: pwsh
