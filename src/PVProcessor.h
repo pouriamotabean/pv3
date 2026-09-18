@@ -64,7 +64,10 @@ private:
     // UPGRADE (tape saturation): one-pole lowpass state used to split the signal into a low/mid
     // band and a high band, so the two can be saturated differently (see processBlock) - this is
     // what lets the added harmonics sit "in the highs" instead of reacting mostly to bass energy.
-    float tapeHpState = 0.f;
+    // FIX (real bug - separate per channel): Tape is now applied to the full stereo (post-Magic)
+    // signal, and L/R can genuinely differ once Magic>0 - sharing one state would leak filter memory
+    // between channels, same class of bug as the chorus buffers below (which already are per-channel).
+    float tapeHpStateL = 0.f, tapeHpStateR = 0.f;
 
     // UPGRADE (real chorus): true modulated-delay chorus replacing the old amplitude-modulation
     // approximation. One delay line per output channel; sized for sample rate in prepareToPlay.
