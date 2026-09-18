@@ -49,14 +49,6 @@ float PVAudioProcessor::PVocoder::process(float x, double sr)
 
         fft->performRealOnlyInverseTransform(fftOut.data());
         const float norm = 1.0f / (float)(N * 0.5);
-        // FIX (bug #2 - broken overlap-add): outRing is now sized N (was 2N) and this write uses
-        // the SAME modulus (N) as the single-sample read at the top of process() (idx=pos, which
-        // only ever ranges 0..N-1). Previously this wrote with modulo 2N, so for any analysis frame
-        // that didn't start exactly at pos==0, part (often most) of its contribution landed at
-        // indices >= N that the read side could never reach - silently discarding a large chunk of
-        // the synthesized signal every hop. A same-modulus circular buffer is the standard, correct
-        // way to do overlap-add here; the read-then-zero at the top of process() (outRing[read]=0)
-        // is what makes it safe to keep re-accumulating into the same wrapped buffer.
         for (int i=0;i<N;++i)
         {
             int idx=(pos+i)%N;
@@ -79,9 +71,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout PVAudioProcessor::createPara
     using P=juce::AudioParameterFloat;
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     p.push_back(std::make_unique<juce::AudioParameterBool>("bypass","Bypass",false));
-    p.push_back(std::make_unique<juce::AudioParameterBool>("magic","Magic",true));
-    p.push_back(std::make_unique<P>("tape","Tape",juce::NormalisableRange<float>(0,.20f,.001f),.08f));
-    p.push_back(std::make_unique<P>("chorus","Chorus",juce::NormalisableRange<float>(0,.20f,.001f),.06f));
+    // FIX (requested): Magic is no longer an on/off switch - it's a knob controlling the volume of
+    // JUST the two pitched/panned voices (0 = silent, i.e. audibly identical to bypass; 1.0 = those
+    // two voices reach full/unity level with the centre line). Default 0, per the explicit request
+    // that a freshly-opened plugin makes no audible difference until you turn something up.
+    p.push_back(std::make_unique<P>("magic","Magic",juce::NormalisableRange<float>(0.f,1.f,0.001f),0.f));
+    p.push_back(std::make_unique<P>("tape","Tape",juce::NormalisableRange<float>(0,.20f,.001f),0.f));
+    p.push_back(std::make_unique<P>("chorus","Chorus",juce::NormalisableRange<float>(0,.20f,.001f),0.f));
     return {p.begin(),p.end()};
 }
 
@@ -91,25 +87,17 @@ void PVAudioProcessor::prepareToPlay(double sampleRate,int)
     up.prepare(std::pow(2.0,10.0/1200.0));
     down.prepare(std::pow(2.0,-10.0/1200.0));
     up.reset(); down.reset();
-    tapeHpState = 0.f;
-    // Enough headroom for the chorus delay (center + depth, see chorusVoice) at any sample rate.
+    tapeHpStateL = 0.f; tapeHpStateR = 0.f;
     const int chorusBufSize = (int)(sampleRate*0.05) + 16;
     chorusBufL.assign((size_t)chorusBufSize, 0.f);
     chorusBufR.assign((size_t)chorusBufSize, 0.f);
     chorusWriteL = 0; chorusWriteR = 0;
-    // FIX (latency not reported): the phase vocoder needs a full analysis window (N samples)
-    // before its output is musically meaningful, so the plugin has real inherent latency. Without
-    // reporting it, the host won't time-align (PDC) this track against unprocessed ones - for a
-    // doubling effect specifically, that misalignment is very audible. up.N and down.N are always
-    // equal (both PVocoder instances use the same fixed N), so either can be used here.
+    // The phase vocoder needs a full analysis window (N samples) before its output is musically
+    // meaningful, so the plugin has real inherent latency - reported so the host time-aligns (PDC)
+    // this track against unprocessed ones, which matters a lot for a doubling effect specifically.
     setLatencySamples(up.N);
 }
 
-// UPGRADE (real chorus): a single modulated-delay voice - writes the input into a circular buffer,
-// reads it back from a delay time that oscillates sinusoidally (lfoPhase), with linear interpolation
-// between samples for a smooth (click-free) modulated delay. Two of these (one per channel, driven
-// with a phase-offset LFO) is the standard, classic way to build a chorus, replacing the previous
-// amplitude-modulation approximation.
 float PVAudioProcessor::chorusVoice(std::vector<float>& buf, int& writePos, float input, double lfoPhase)
 {
     const float centerMs = 18.0f, depthMs = 6.0f;
@@ -139,26 +127,39 @@ bool PVAudioProcessor::isBusesLayoutSupported(const BusesLayout& l) const
 void PVAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals nd;
-    if(apvts.getRawParameterValue("bypass")->load()>.5f) return;
-    const bool magic=apvts.getRawParameterValue("magic")->load()>.5f;
+    const int n=b.getNumSamples();
+
+    // FIX (real bug - BYPASS did nothing to the buffer): this plugin is mono-in/stereo-out, so
+    // channel 1 of the buffer handed to processBlock has no real input source behind it at all - it
+    // can legitimately contain stale/uninitialised memory depending on the host. The old bypass just
+    // `return`ed without touching the buffer, so that channel's leftover content went straight to the
+    // output - exactly matching "bypass doesn't work / sometimes a loud noise until I turn it off".
+    // Bypass now explicitly builds a correct, clean mono-to-stereo passthrough every time.
+    if(apvts.getRawParameterValue("bypass")->load()>.5f)
+    {
+        for(int i=0;i<n;++i){ float v=b.getSample(0,i); b.setSample(0,i,v); if(b.getNumChannels()>1) b.setSample(1,i,v); }
+        return;
+    }
+
+    const float magic=apvts.getRawParameterValue("magic")->load();
     const float tape=apvts.getRawParameterValue("tape")->load();
     const float chorus=apvts.getRawParameterValue("chorus")->load();
-    const int n=b.getNumSamples();
     std::vector<float> x((size_t)n);
     for(int i=0;i<n;++i) x[(size_t)i]=b.getSample(0,i);
 
-    // UPGRADE (tape saturation with nicer high-end harmonics): the signal is split into a low/mid
-    // band and a high band (~3kHz crossover) using a simple one-pole lowpass. The low/mid band gets
-    // a gentle classic soft-clip (like before). The high band is driven harder with a touch of
-    // asymmetry, so the extra harmonics it generates are themselves high-frequency content - a
-    // pleasant "shimmer/air" rather than the old full-band tanh, which (being fed one mixed signal)
-    // mostly reacted to low-frequency energy and gave comparatively little distinct top-end character.
-    auto tapeFx=[&](float v){
+    // FIX (real bug - click/noise when raising Magic from 0): the two Phase Vocoders used to only be
+    // fed samples while Magic was on, so their internal state (ring-buffer position, accumulated
+    // phase) went stale the instant Magic was off, then resumed from that stale, discontinuous state
+    // the instant it was turned back on - a classic source of a phase-vocoder glitch/transient. They
+    // now ALWAYS process every sample, unconditionally, keeping their internal state continuously
+    // "warm" - Magic only controls how much of their (always valid) output gets mixed in below, which
+    // is a completely safe place to scale by a plain multiply, no discontinuity risk at all.
+    auto tapeFx=[&](float v, float& hpState){
         const float drive = 1.f + 5.0f*tape;
         const float hpCoeff = 1.f - std::exp(-2.f*juce::MathConstants<float>::pi*3000.f/(float)sr);
-        tapeHpState += hpCoeff * (v - tapeHpState);
-        const float lowPart = tapeHpState;
-        const float highPart = v - tapeHpState;
+        hpState += hpCoeff * (v - hpState);
+        const float lowPart = hpState;
+        const float highPart = v - hpState;
 
         const float lowSat = std::tanh(lowPart*drive) / std::tanh(drive);
 
@@ -173,15 +174,16 @@ void PVAudioProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer
     double ph = chorusPhase;
     for(int i=0;i<n;++i)
     {
-        float c=tapeFx(x[(size_t)i]), l=0,r=0;
-        if(magic){ l=down.process(x[(size_t)i],sr); r=up.process(x[(size_t)i],sr); }
-        float outL = c + l*.30f;
-        float outR = c + r*.30f;
+        // FIX (requested - chain order): Magic first (centre + the two pitched/panned voices, scaled
+        // by the Magic knob, 0=silent up to 1.0=unity with centre) -> Tape applied to that FULL
+        // stereo result (not just the centre, like before) -> Chorus last.
+        const float l=down.process(x[(size_t)i],sr), r=up.process(x[(size_t)i],sr);
+        float outL = x[(size_t)i] + l*magic;
+        float outR = x[(size_t)i] + r*magic;
 
-        // UPGRADE (real chorus): true modulated-delay chorus on the finished stereo pair, replacing
-        // the old amplitude-modulation approximation. The two channels' LFOs are offset in phase
-        // (ph vs ph+1.7) exactly like before, which is what gives the effect stereo movement/width
-        // rather than both channels wobbling identically.
+        outL = tapeFx(outL, tapeHpStateL);
+        outR = tapeFx(outR, tapeHpStateR);
+
         ph += juce::MathConstants<double>::twoPi*0.35/sr;
         const float wetL = chorusVoice(chorusBufL, chorusWriteL, outL, ph);
         const float wetR = chorusVoice(chorusBufR, chorusWriteR, outR, ph+1.7);
@@ -206,9 +208,6 @@ void PVAudioProcessor::setStateInformation(const void* data,int size)
 }
 juce::AudioProcessorEditor* PVAudioProcessor::createEditor(){return new PVAudioProcessorEditor(*this);}
 
-// FIX (bug #1 - missing link-time symbol): JUCE's plugin wrapper code calls this factory function
-// to create the processor instance; without a definition anywhere in the linked sources, the build
-// fails at the link stage with an unresolved external symbol error. This was missing entirely.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PVAudioProcessor();
