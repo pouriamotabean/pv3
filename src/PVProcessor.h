@@ -30,6 +30,7 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    juce::AudioProcessorParameter* getBypassParameter() const override { return apvts.getParameter("bypass"); }
 
 private:
     struct PVocoder
